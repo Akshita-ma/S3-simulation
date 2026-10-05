@@ -19,3 +19,16 @@ class BucketResponse(BucketBase):
     total_size_bytes: int = Field(0, description="Cumulative size of all objects in bytes")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class S3ObjectResponse(BaseModel):
+    id: int
+    bucket_id: int
+    key: str
+    size_bytes: int
+    mime_type: str
+    content_hash: str
+    is_encrypted: bool = False
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
