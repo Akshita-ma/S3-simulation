@@ -26,14 +26,16 @@ import {
   ArrowLeft,
   X,
   Loader2,
-  Hash,
-  Clock,
-  Layers,
   Share2,
   Link2,
   Timer,
   Check,
+  Lock,
+  Unlock,
+  KeyRound,
 } from "lucide-react";
+import { encryptFileClientSide, decryptFileClientSide } from "@/lib/crypto";
+import ConsoleHeader from "@/components/ConsoleHeader";
 
 interface S3Object {
   id: number;
@@ -148,10 +150,22 @@ export default function BucketDetailPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Client-Side Zero-Knowledge Encryption State (Stage 5)
+  const [encryptClientSide, setEncryptClientSide] = useState(false);
+  const [encryptionPassphrase, setEncryptionPassphrase] = useState("");
+
   // Preview Modal state
   const [previewObject, setPreviewObject] = useState<S3Object | null>(null);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [decryptedMediaUrl, setDecryptedMediaUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Decryption Prompt Modal state (Stage 5)
+  const [decryptTargetObject, setDecryptTargetObject] = useState<S3Object | null>(null);
+  const [decryptAction, setDecryptAction] = useState<"preview" | "download">("preview");
+  const [decryptPassphrase, setDecryptPassphrase] = useState("");
+  const [decryptLoading, setDecryptLoading] = useState(false);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
 
   // Delete Modal state
   const [objectToDelete, setObjectToDelete] = useState<S3Object | null>(null);
@@ -227,6 +241,15 @@ export default function BucketDetailPage() {
     return () => clearInterval(interval);
   }, [presignedData]);
 
+  // Clean up any generated blob URLs when closing preview
+  useEffect(() => {
+    return () => {
+      if (decryptedMediaUrl) {
+        URL.revokeObjectURL(decryptedMediaUrl);
+      }
+    };
+  }, [decryptedMediaUrl]);
+
   // Filtered objects
   const filteredObjects = useMemo(() => {
     return objects.filter(
@@ -269,23 +292,37 @@ export default function BucketDetailPage() {
     }
   };
 
-  // Submit Upload
+  // Submit Upload with optional Client-Side Zero-Knowledge Encryption
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (uploadFiles.length === 0) return;
+
+    if (encryptClientSide && !encryptionPassphrase.trim()) {
+      setUploadError("Passphrase is required when Client-Side Encryption is enabled.");
+      return;
+    }
 
     setUploading(true);
     setUploadError(null);
 
     try {
       for (let i = 0; i < uploadFiles.length; i++) {
-        const file = uploadFiles[i];
+        let file = uploadFiles[i];
+        let isEncrypted = false;
+
+        if (encryptClientSide) {
+          file = await encryptFileClientSide(file, encryptionPassphrase.trim());
+          isEncrypted = true;
+        }
+
         const formData = new FormData();
         formData.append("file", file);
+        formData.append("is_encrypted", isEncrypted ? "true" : "false");
+
         if (uploadFiles.length === 1 && customKey.trim()) {
           formData.append("key", customKey.trim());
         } else {
-          formData.append("key", file.name);
+          formData.append("key", uploadFiles[i].name);
         }
 
         const res = await fetch(`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects`, {
@@ -299,9 +336,15 @@ export default function BucketDetailPage() {
         }
       }
 
-      showToast(`Successfully uploaded ${uploadFiles.length} file(s)!`, "success");
+      showToast(
+        `Successfully uploaded ${uploadFiles.length} file(s) ${
+          encryptClientSide ? "(Encrypted with AES-GCM 256-bit)" : ""
+        }!`,
+        "success"
+      );
       setUploadFiles([]);
       setCustomKey("");
+      setEncryptionPassphrase("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       loadData();
     } catch (err: any) {
@@ -311,8 +354,22 @@ export default function BucketDetailPage() {
     }
   };
 
-  // Open Preview Modal
+  // Open Preview Modal (Direct or Decrypted)
   const openPreview = async (obj: S3Object) => {
+    if (obj.is_encrypted) {
+      // Prompt user for passphrase
+      setDecryptTargetObject(obj);
+      setDecryptAction("preview");
+      setDecryptPassphrase("");
+      setDecryptError(null);
+      return;
+    }
+
+    if (decryptedMediaUrl) {
+      URL.revokeObjectURL(decryptedMediaUrl);
+      setDecryptedMediaUrl(null);
+    }
+
     setPreviewObject(obj);
     setPreviewContent(null);
     setPreviewLoading(true);
@@ -344,6 +401,108 @@ export default function BucketDetailPage() {
     setPreviewLoading(false);
   };
 
+  // Trigger download (Direct or Decrypted)
+  const handleDownloadClick = async (obj: S3Object) => {
+    if (obj.is_encrypted) {
+      setDecryptTargetObject(obj);
+      setDecryptAction("download");
+      setDecryptPassphrase("");
+      setDecryptError(null);
+      return;
+    }
+
+    // Direct download
+    const url = `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(obj.key)}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = obj.key.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // Execute Decryption for Preview or Download
+  const handleExecuteDecryption = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!decryptTargetObject) return;
+
+    if (!decryptPassphrase.trim()) {
+      setDecryptError("Please enter your secret passphrase.");
+      return;
+    }
+
+    setDecryptLoading(true);
+    setDecryptError(null);
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(
+          decryptTargetObject.key
+        )}`
+      );
+
+      if (!res.ok) {
+        throw new Error("Failed to fetch encrypted object blob from server.");
+      }
+
+      const encryptedBuffer = await res.arrayBuffer();
+      const plaintextBuffer = await decryptFileClientSide(encryptedBuffer, decryptPassphrase.trim());
+
+      showToast("Decryption successful!", "success");
+
+      if (decryptAction === "download") {
+        const blob = new Blob([plaintextBuffer], { type: decryptTargetObject.mime_type });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = decryptTargetObject.key.split("/").pop() || "decrypted_file";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+
+        setDecryptTargetObject(null);
+        setDecryptPassphrase("");
+      } else {
+        // Preview mode
+        if (decryptedMediaUrl) {
+          URL.revokeObjectURL(decryptedMediaUrl);
+        }
+
+        const isText =
+          decryptTargetObject.mime_type.startsWith("text/") ||
+          decryptTargetObject.mime_type.includes("json") ||
+          decryptTargetObject.mime_type.includes("javascript") ||
+          decryptTargetObject.mime_type.includes("python") ||
+          decryptTargetObject.mime_type.includes("xml") ||
+          decryptTargetObject.mime_type.includes("csv") ||
+          decryptTargetObject.key.endsWith(".md") ||
+          decryptTargetObject.key.endsWith(".txt") ||
+          decryptTargetObject.key.endsWith(".json");
+
+        if (isText) {
+          const text = new TextDecoder().decode(plaintextBuffer);
+          setPreviewContent(text);
+          setDecryptedMediaUrl(null);
+        } else {
+          const blob = new Blob([plaintextBuffer], { type: decryptTargetObject.mime_type });
+          const blobUrl = URL.createObjectURL(blob);
+          setDecryptedMediaUrl(blobUrl);
+          setPreviewContent(null);
+        }
+
+        const target = decryptTargetObject;
+        setDecryptTargetObject(null);
+        setDecryptPassphrase("");
+        setPreviewObject(target);
+      }
+    } catch (err: any) {
+      setDecryptError(err.message || "Decryption failed. Incorrect passphrase or corrupted data.");
+    } finally {
+      setDecryptLoading(false);
+    }
+  };
+
   // Open Presign Modal
   const openPresignModal = (obj: S3Object) => {
     setPresignObject(obj);
@@ -362,7 +521,9 @@ export default function BucketDetailPage() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(presignObject.key)}/presign`,
+        `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(
+          presignObject.key
+        )}/presign`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -391,7 +552,9 @@ export default function BucketDetailPage() {
     setDeleteSubmitting(true);
     try {
       const res = await fetch(
-        `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(objectToDelete.key)}`,
+        `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(
+          objectToDelete.key
+        )}`,
         { method: "DELETE" }
       );
       if (!res.ok) {
@@ -433,34 +596,10 @@ export default function BucketDetailPage() {
       )}
 
       {/* Top AWS Console Global Bar */}
-      <nav className="bg-[#131b2c] border-b border-slate-800 px-4 py-2.5 flex items-center justify-between text-xs">
-        <div className="flex items-center gap-3">
-          <Link href="/" className="flex items-center gap-2 hover:opacity-90">
-            <div className="w-6 h-6 rounded bg-[#ec7211] flex items-center justify-center font-black text-slate-950 text-xs">
-              S3
-            </div>
-            <span className="font-semibold text-slate-100 tracking-wide text-sm">Smart Vault Console</span>
-          </Link>
-          <span className="text-slate-600">|</span>
-          <span className="text-slate-400">AWS S3 Simulation Engine</span>
-        </div>
-
-        <div className="flex items-center gap-4 text-slate-400">
-          <div className="flex items-center gap-1.5 bg-slate-900/80 px-2.5 py-1 rounded border border-slate-800">
-            <Globe className="w-3.5 h-3.5 text-amber-500" />
-            <span className="text-slate-300 font-mono">{bucketMeta?.region || "us-east-1"}</span>
-          </div>
-          <a
-            href={`${API_BASE}/docs`}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-1 text-slate-300 hover:text-amber-400 transition-colors"
-          >
-            <span>Swagger API</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-      </nav>
+      <ConsoleHeader
+        region={bucketMeta?.region || "us-east-1"}
+        isBackendHealthy={!loading}
+      />
 
       {/* Breadcrumb Navigation */}
       <div className="bg-[#101827] border-b border-slate-800/80 px-6 py-2.5 text-xs text-slate-400 flex items-center gap-2">
@@ -514,14 +653,14 @@ export default function BucketDetailPage() {
           </div>
         </div>
 
-        {/* Upload Zone */}
+        {/* Upload Zone with Client-Side Encryption Toggle */}
         <section className="bg-[#121c2e] border border-slate-800 rounded-xl p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <UploadCloud className="w-5 h-5 text-amber-400" />
               <h2 className="text-sm font-semibold text-white">Upload objects</h2>
             </div>
-            <span className="text-[11px] text-slate-400">Drag & drop files or choose from disk</span>
+            <span className="text-[11px] text-slate-400">Content-Addressable Deduplication Enabled</span>
           </div>
 
           <form onSubmit={handleUpload} className="space-y-4">
@@ -544,10 +683,49 @@ export default function BucketDetailPage() {
                   <span className="text-slate-400"> or drag and drop files here</span>
                 </div>
                 <p className="text-[11px] text-slate-500">
-                  Files are stored in <code className="text-slate-400">storage/{bucketName}/</code> with SHA-256 integrity
-                  verification.
+                  Blobs are stored under <code className="text-slate-400">storage/blobs/&lt;sha256&gt;</code> with instant
+                  zero-overhead deduplication.
                 </p>
               </div>
+            </div>
+
+            {/* Zero-Knowledge Client-Side Encryption Toggle Card */}
+            <div className="p-3.5 bg-[#0a1220] border border-slate-800 rounded-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={encryptClientSide}
+                    onChange={(e) => setEncryptClientSide(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
+                  />
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                    <Lock className={`w-3.5 h-3.5 ${encryptClientSide ? "text-emerald-400" : "text-slate-400"}`} />
+                    <span>Client-Side Encryption (Zero-Knowledge)</span>
+                  </div>
+                </label>
+                <span className="text-[10px] text-slate-500 font-mono">Web Crypto AES-GCM 256-bit</span>
+              </div>
+
+              {encryptClientSide && (
+                <div className="pt-1 space-y-1.5 animate-in fade-in duration-150">
+                  <div className="relative">
+                    <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="password"
+                      required
+                      placeholder="Enter secret passphrase (never sent to server)..."
+                      value={encryptionPassphrase}
+                      onChange={(e) => setEncryptionPassphrase(e.target.value)}
+                      className="w-full bg-slate-950 border border-emerald-700/60 rounded pl-9 pr-3 py-1.5 text-xs font-mono text-emerald-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <p className="text-[10px] text-emerald-400/80">
+                    🔒 Payload bytes will be encrypted locally in your browser before upload using PBKDF2 (100k rounds) +
+                    AES-GCM. The plaintext will NEVER touch the network or disk.
+                  </p>
+                </div>
+              )}
             </div>
 
             {uploadFiles.length > 0 && (
@@ -593,9 +771,6 @@ export default function BucketDetailPage() {
                       onChange={(e) => setCustomKey(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
                     />
-                    <p className="text-[10px] text-slate-500">
-                      Prefix with folder structure e.g. <code className="text-slate-400">images/profile.png</code>
-                    </p>
                   </div>
                 )}
 
@@ -615,7 +790,7 @@ export default function BucketDetailPage() {
                     {uploading ? (
                       <>
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Uploading...</span>
+                        <span>{encryptClientSide ? "Encrypting & Uploading..." : "Uploading..."}</span>
                       </>
                     ) : (
                       <>
@@ -723,7 +898,6 @@ export default function BucketDetailPage() {
               ) : (
                 filteredObjects.map((obj) => {
                   const isSelected = selectedKeys.includes(obj.key);
-                  const downloadUrl = `${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(obj.key)}`;
 
                   return (
                     <tr
@@ -743,9 +917,9 @@ export default function BucketDetailPage() {
                         />
                       </td>
 
-                      {/* Name / Key */}
+                      {/* Name / Key + Lock Badge */}
                       <td className="p-3.5 font-medium text-slate-100">
-                        <div className="flex items-center gap-2 group">
+                        <div className="flex items-center gap-2 group flex-wrap">
                           {getFileIcon(obj.mime_type, obj.key)}
                           <button
                             onClick={() => openPreview(obj)}
@@ -753,6 +927,14 @@ export default function BucketDetailPage() {
                           >
                             {obj.key}
                           </button>
+
+                          {obj.is_encrypted && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/80 border border-emerald-500/50 text-emerald-300">
+                              <Lock className="w-2.5 h-2.5" />
+                              <span>Encrypted</span>
+                            </span>
+                          )}
+
                           <button
                             onClick={() => {
                               navigator.clipboard.writeText(obj.key);
@@ -785,20 +967,17 @@ export default function BucketDetailPage() {
                           <button
                             onClick={() => openPreview(obj)}
                             className="p-1.5 rounded text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition-colors"
-                            title="Preview file"
+                            title={obj.is_encrypted ? "Decrypt & Preview" : "Preview file"}
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
-                          <a
-                            href={downloadUrl}
-                            download={obj.key.split("/").pop()}
-                            target="_blank"
-                            rel="noreferrer"
+                          <button
+                            onClick={() => handleDownloadClick(obj)}
                             className="p-1.5 rounded text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition-colors"
-                            title="Download file"
+                            title={obj.is_encrypted ? "Decrypt & Download" : "Download file"}
                           >
                             <Download className="w-3.5 h-3.5" />
-                          </a>
+                          </button>
                           <button
                             onClick={() => openPresignModal(obj)}
                             className="p-1.5 rounded text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition-colors"
@@ -824,11 +1003,96 @@ export default function BucketDetailPage() {
         </div>
       </div>
 
+      {/* DECRYPTION PROMPT MODAL (Stage 5) */}
+      {decryptTargetObject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="bg-[#131c2e] border border-emerald-700/60 rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-emerald-950/30">
+              <div className="flex items-center gap-2 text-emerald-400 font-semibold text-sm">
+                <Lock className="w-5 h-5 shrink-0" />
+                <h3>Zero-Knowledge Decryption Required</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setDecryptTargetObject(null);
+                  setDecryptPassphrase("");
+                }}
+                className="text-slate-400 hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleExecuteDecryption}>
+              <div className="p-6 space-y-4 text-xs text-slate-300">
+                <p className="leading-relaxed">
+                  The object <strong className="text-amber-300 font-mono">{decryptTargetObject.key}</strong> was encrypted
+                  client-side using AES-GCM 256-bit. Please enter your secret passphrase to decrypt and{" "}
+                  {decryptAction === "preview" ? "preview" : "download"} it.
+                </p>
+
+                <div className="space-y-1.5">
+                  <label className="block text-slate-200 font-semibold">Passphrase</label>
+                  <div className="relative">
+                    <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="password"
+                      autoFocus
+                      required
+                      placeholder="Enter passphrase..."
+                      value={decryptPassphrase}
+                      onChange={(e) => setDecryptPassphrase(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-700 rounded pl-9 pr-3 py-2 text-xs font-mono text-emerald-200 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                {decryptError && (
+                  <div className="p-2.5 rounded bg-red-950/80 border border-red-800 text-red-200 text-xs flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{decryptError}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 px-6 py-3.5 border-t border-slate-800 bg-[#101827]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDecryptTargetObject(null);
+                    setDecryptPassphrase("");
+                  }}
+                  className="px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 border border-slate-700 rounded transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={decryptLoading}
+                  className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold text-slate-950 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 rounded transition-colors disabled:opacity-50"
+                >
+                  {decryptLoading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Decrypting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>{decryptAction === "preview" ? "Decrypt & Preview" : "Decrypt & Download"}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* GENERATE PRE-SIGNED URL MODAL */}
       {presignObject && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
           <div className="bg-[#131c2e] border border-slate-700 rounded-xl shadow-2xl w-full max-w-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col">
-            {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-[#162238]">
               <div className="flex items-center gap-2.5">
                 <div className="p-1.5 rounded bg-amber-500/20 text-amber-400">
@@ -850,17 +1114,13 @@ export default function BucketDetailPage() {
               </button>
             </div>
 
-            {/* Body */}
             <div className="p-6 space-y-5 text-xs text-slate-300">
               <p className="text-slate-400 leading-relaxed">
-                Pre-signed URLs grant temporary public access to download an object without requiring AWS credentials.
+                Pre-signed URLs grant temporary public access to download an object without requiring credentials.
               </p>
 
-              {/* Expiration Selectors */}
               <div className="space-y-2">
-                <label className="block text-xs font-semibold text-slate-200">
-                  Select link expiration window:
-                </label>
+                <label className="block text-xs font-semibold text-slate-200">Select link expiration window:</label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {EXPIRATION_OPTIONS.map((opt) => (
                     <button
@@ -892,7 +1152,6 @@ export default function BucketDetailPage() {
                 </div>
               )}
 
-              {/* Generated Result Box */}
               {presignedData ? (
                 <div className="p-4 bg-[#090f1a] border border-amber-900/60 rounded-xl space-y-3">
                   <div className="flex items-center justify-between">
@@ -901,7 +1160,6 @@ export default function BucketDetailPage() {
                       <span>Ready to Share</span>
                     </span>
 
-                    {/* Active Countdown Badge */}
                     <div
                       className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-mono font-medium border ${
                         countdownSeconds !== null && countdownSeconds > 0
@@ -920,7 +1178,6 @@ export default function BucketDetailPage() {
                     </div>
                   </div>
 
-                  {/* Complete Shareable URL */}
                   <div className="relative">
                     <input
                       type="text"
@@ -969,7 +1226,6 @@ export default function BucketDetailPage() {
               )}
             </div>
 
-            {/* Footer */}
             <div className="flex items-center justify-between px-6 py-4 border-t border-slate-800 bg-[#101827]">
               <button
                 type="button"
@@ -1013,7 +1269,14 @@ export default function BucketDetailPage() {
               <div className="flex items-center gap-2.5">
                 {getFileIcon(previewObject.mime_type, previewObject.key)}
                 <div>
-                  <h3 className="text-sm font-semibold text-white font-mono">{previewObject.key}</h3>
+                  <h3 className="text-sm font-semibold text-white font-mono flex items-center gap-2">
+                    <span>{previewObject.key}</span>
+                    {previewObject.is_encrypted && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-500/50 text-emerald-300 font-sans font-normal">
+                        Decrypted in-memory
+                      </span>
+                    )}
+                  </h3>
                   <p className="text-[11px] text-slate-400">{previewObject.mime_type}</p>
                 </div>
               </div>
@@ -1029,15 +1292,23 @@ export default function BucketDetailPage() {
                   <Share2 className="w-3.5 h-3.5" />
                   <span>Share</span>
                 </button>
-                <a
-                  href={`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(previewObject.key)}`}
-                  download={previewObject.key.split("/").pop()}
+                <button
+                  onClick={() => handleDownloadClick(previewObject)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded transition-colors"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Download</span>
-                </a>
-                <button onClick={() => setPreviewObject(null)} className="text-slate-400 hover:text-slate-200">
+                </button>
+                <button
+                  onClick={() => {
+                    if (decryptedMediaUrl) {
+                      URL.revokeObjectURL(decryptedMediaUrl);
+                      setDecryptedMediaUrl(null);
+                    }
+                    setPreviewObject(null);
+                  }}
+                  className="text-slate-400 hover:text-slate-200"
+                >
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1050,9 +1321,32 @@ export default function BucketDetailPage() {
                     <Loader2 className="w-5 h-5 animate-spin text-amber-500" />
                     <span>Loading preview...</span>
                   </div>
-                ) : previewObject.mime_type.startsWith("image/") ? (
+                ) : decryptedMediaUrl ? (
+                  previewObject.mime_type.startsWith("image/") ? (
+                    <img
+                      src={decryptedMediaUrl}
+                      alt={previewObject.key}
+                      className="max-h-[360px] max-w-full object-contain p-2"
+                    />
+                  ) : previewObject.mime_type === "application/pdf" ? (
+                    <iframe src={decryptedMediaUrl} className="w-full h-[360px] border-0" title={previewObject.key} />
+                  ) : (
+                    <div className="p-8 text-center space-y-2">
+                      <FileIcon className="w-12 h-12 text-slate-600 mx-auto" />
+                      <p className="text-xs text-slate-300 font-semibold">Decrypted Binary Object</p>
+                      <button
+                        onClick={() => handleDownloadClick(previewObject)}
+                        className="text-xs text-emerald-400 hover:underline"
+                      >
+                        Download decrypted file
+                      </button>
+                    </div>
+                  )
+                ) : previewObject.mime_type.startsWith("image/") && !previewObject.is_encrypted ? (
                   <img
-                    src={`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(previewObject.key)}`}
+                    src={`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(
+                      previewObject.key
+                    )}`}
                     alt={previewObject.key}
                     className="max-h-[360px] max-w-full object-contain p-2"
                   />
@@ -1060,9 +1354,11 @@ export default function BucketDetailPage() {
                   <pre className="w-full h-full max-h-[360px] overflow-auto p-4 text-xs font-mono text-slate-200 bg-slate-950/70 select-text whitespace-pre-wrap">
                     {previewContent}
                   </pre>
-                ) : previewObject.mime_type === "application/pdf" ? (
+                ) : previewObject.mime_type === "application/pdf" && !previewObject.is_encrypted ? (
                   <iframe
-                    src={`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(previewObject.key)}`}
+                    src={`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(
+                      previewObject.key
+                    )}`}
                     className="w-full h-[360px] border-0"
                     title={previewObject.key}
                   />
@@ -1072,7 +1368,9 @@ export default function BucketDetailPage() {
                     <div>
                       <p className="text-xs font-semibold text-slate-300">Raw Binary Object</p>
                       <p className="text-[11px] text-slate-500">
-                        Inline viewer not available for this MIME type. Download the object to view locally.
+                        {previewObject.is_encrypted
+                          ? "This file is encrypted. Use Decrypt & Download to access contents."
+                          : "Inline viewer not available for this MIME type. Download the object to view locally."}
                       </p>
                     </div>
                   </div>
@@ -1097,7 +1395,7 @@ export default function BucketDetailPage() {
                 <div className="sm:col-span-2 p-3 bg-[#0a1220] border border-slate-800 rounded-lg space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">
-                      SHA-256 Checksum
+                      SHA-256 Checksum (Content-Addressable ID)
                     </span>
                     <button
                       onClick={() => {
@@ -1119,7 +1417,13 @@ export default function BucketDetailPage() {
 
             <div className="px-6 py-3 border-t border-slate-800 bg-[#101827] flex items-center justify-end">
               <button
-                onClick={() => setPreviewObject(null)}
+                onClick={() => {
+                  if (decryptedMediaUrl) {
+                    URL.revokeObjectURL(decryptedMediaUrl);
+                    setDecryptedMediaUrl(null);
+                  }
+                  setPreviewObject(null);
+                }}
                 className="px-4 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 border border-slate-700 rounded transition-colors"
               >
                 Close
@@ -1150,7 +1454,8 @@ export default function BucketDetailPage() {
                 <strong className="text-white font-mono">{bucketName}</strong>?
               </p>
               <p className="text-[11px] text-slate-500">
-                This will delete the file blob from disk and remove its metadata record from the database.
+                If other objects share this identical content hash, the underlying physical blob will be preserved via
+                deduplication reference counting.
               </p>
             </div>
 

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import ConsoleHeader from "@/components/ConsoleHeader";
 import {
   Folder,
   Plus,
@@ -29,6 +30,16 @@ interface Bucket {
   created_at: string;
   object_count: number;
   total_size_bytes: number;
+}
+
+interface StorageStats {
+  logical_size_bytes: number;
+  physical_size_bytes: number;
+  saved_space_bytes: number;
+  dedup_ratio: string;
+  total_objects: number;
+  unique_blobs: number;
+  encrypted_objects_count: number;
 }
 
 const REGION_OPTIONS = [
@@ -69,6 +80,7 @@ function formatDate(dateStr: string): string {
 
 export default function S3BucketsConsole() {
   const [buckets, setBuckets] = useState<Bucket[]>([]);
+  const [stats, setStats] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -98,16 +110,25 @@ export default function S3BucketsConsole() {
     setTimeout(() => setToast(null), 4500);
   };
 
-  // Fetch Buckets
+  // Fetch Buckets and Stats
   const fetchBuckets = async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
     try {
-      const res = await fetch(`${API_BASE}/api/buckets`);
-      if (!res.ok) {
-        throw new Error(`Failed to load buckets: ${res.statusText}`);
+      const [bucketsRes, statsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/buckets`),
+        fetch(`${API_BASE}/api/stats`),
+      ]);
+
+      if (!bucketsRes.ok) {
+        throw new Error(`Failed to load buckets: ${bucketsRes.statusText}`);
       }
-      const data: Bucket[] = await res.json();
+      const data: Bucket[] = await bucketsRes.json();
       setBuckets(data);
+
+      if (statsRes.ok) {
+        const statsData: StorageStats = await statsRes.json();
+        setStats(statsData);
+      }
     } catch (err: any) {
       showToast(err.message || "Failed to connect to backend", "error");
     } finally {
@@ -266,34 +287,7 @@ export default function S3BucketsConsole() {
       )}
 
       {/* Top AWS Console Global Bar */}
-      <nav className="bg-[#131b2c] border-b border-slate-800 px-4 py-2.5 flex items-center justify-between text-xs">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-[#ec7211] flex items-center justify-center font-black text-slate-950 text-xs">
-              S3
-            </div>
-            <span className="font-semibold text-slate-100 tracking-wide text-sm">Smart Vault Console</span>
-          </div>
-          <span className="text-slate-600">|</span>
-          <span className="text-slate-400">AWS S3 Simulation Engine</span>
-        </div>
-
-        <div className="flex items-center gap-4 text-slate-400">
-          <div className="flex items-center gap-1.5 bg-slate-900/80 px-2.5 py-1 rounded border border-slate-800">
-            <Globe className="w-3.5 h-3.5 text-amber-500" />
-            <span className="text-slate-300 font-mono">Global Region</span>
-          </div>
-          <a
-            href={`${API_BASE}/docs`}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-1 text-slate-300 hover:text-amber-400 transition-colors"
-          >
-            <span>Swagger API</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-      </nav>
+      <ConsoleHeader region="us-east-1" isBackendHealthy={!loading} />
 
       {/* Breadcrumb Bar */}
       <div className="bg-[#101827] border-b border-slate-800/80 px-6 py-2.5 text-xs text-slate-400 flex items-center gap-2">
@@ -354,6 +348,94 @@ export default function S3BucketsConsole() {
             </button>
           </div>
         </div>
+
+        {/* Vault Storage Optimization (Stage 5 Enhancement Widget) */}
+        {stats && (
+          <section className="bg-[#121c2e] border border-slate-800 rounded-xl p-5 space-y-4 shadow-lg shadow-black/20">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-400">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <span>Vault Storage Optimization</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-600/50 text-emerald-300 font-normal">
+                      Active
+                    </span>
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Content-Addressable Block Deduplication & Client-Side Zero-Knowledge Encryption metrics
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-400 text-[11px]">Deduplication Savings:</span>
+                <span className="font-mono font-bold text-emerald-400 text-sm">{stats.dedup_ratio}</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-1">
+              {/* Space Saved Card */}
+              <div className="p-3.5 rounded-lg bg-[#0b1322] border border-slate-800/90 space-y-1">
+                <div className="flex items-center justify-between text-slate-400">
+                  <span className="text-[10px] uppercase font-semibold tracking-wider">Total Space Saved</span>
+                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                </div>
+                <div className="text-xl font-bold text-emerald-400 font-mono">
+                  {formatBytes(stats.saved_space_bytes)}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {stats.dedup_ratio} physical capacity spared
+                </p>
+              </div>
+
+              {/* Deduplication Consolidations */}
+              <div className="p-3.5 rounded-lg bg-[#0b1322] border border-slate-800/90 space-y-1">
+                <div className="flex items-center justify-between text-slate-400">
+                  <span className="text-[10px] uppercase font-semibold tracking-wider">Objects vs Blobs</span>
+                  <Copy className="w-3.5 h-3.5 text-cyan-400" />
+                </div>
+                <div className="text-xl font-bold text-white font-mono">
+                  {stats.total_objects} <span className="text-xs text-slate-400 font-normal">objects</span> / {stats.unique_blobs}{" "}
+                  <span className="text-xs text-slate-400 font-normal">blobs</span>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {stats.total_objects - stats.unique_blobs} deduplicated object references
+                </p>
+              </div>
+
+              {/* Active Zero-Knowledge Encryption */}
+              <div className="p-3.5 rounded-lg bg-[#0b1322] border border-slate-800/90 space-y-1">
+                <div className="flex items-center justify-between text-slate-400">
+                  <span className="text-[10px] uppercase font-semibold tracking-wider">Encrypted Objects</span>
+                  <Shield className="w-3.5 h-3.5 text-violet-400" />
+                </div>
+                <div className="text-xl font-bold text-violet-300 font-mono">
+                  {stats.encrypted_objects_count}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Client-side AES-GCM 256-bit protected
+                </p>
+              </div>
+
+              {/* Physical Disk Usage */}
+              <div className="p-3.5 rounded-lg bg-[#0b1322] border border-slate-800/90 space-y-1">
+                <div className="flex items-center justify-between text-slate-400">
+                  <span className="text-[10px] uppercase font-semibold tracking-wider">Physical Storage</span>
+                  <Database className="w-3.5 h-3.5 text-amber-400" />
+                </div>
+                <div className="text-xl font-bold text-slate-200 font-mono">
+                  {formatBytes(stats.physical_size_bytes)}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Logical Capacity: {formatBytes(stats.logical_size_bytes)}
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* Filter Toolbar */}
         <div className="bg-[#121c2e] border border-slate-800 rounded-t-lg p-3 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
