@@ -13,11 +13,13 @@ try:
     import models  # Ensure models are loaded before create_all
     from routers.buckets import router as buckets_router
     from routers.objects import router as objects_router
+    from routers.presign import router as presign_router
 except ImportError:
     from backend.database import engine, Base, get_db
     import backend.models as models
     from backend.routers.buckets import router as buckets_router
     from backend.routers.objects import router as objects_router
+    from backend.routers.presign import router as presign_router
 
 
 @asynccontextmanager
@@ -52,6 +54,7 @@ app.add_middleware(
 # Register API Routers
 app.include_router(buckets_router, prefix="/api")
 app.include_router(objects_router, prefix="/api")
+app.include_router(presign_router, prefix="/api")
 
 
 @app.get("/", tags=["Root"])

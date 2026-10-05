@@ -1,8 +1,8 @@
 # Smart Vault (S3 Simulation)
 
-A simulated Amazon S3 object storage platform featuring:
-- **FastAPI** backend with SQLite database and SQLAlchemy ORM.
-- **Next.js** (App Router) + **Tailwind CSS** frontend styled like the **AWS S3 Console**.
+A high-fidelity Amazon S3 object storage simulation platform featuring:
+- **FastAPI** backend with SQLite database, SQLAlchemy ORM, local physical disk blob storage, and HMAC-SHA256 pre-signed URLs.
+- **Next.js** (App Router) + **Tailwind CSS** frontend styled like the **AWS S3 Management Console**.
 - Full metadata tracking for buckets and objects (including SHA-256 integrity hashes, storage paths, encryption flags, and MIME types).
 
 ---
@@ -18,10 +18,12 @@ A simulated Amazon S3 object storage platform featuring:
 │   ├── main.py             # FastAPI entry point, CORS middleware, and /health endpoint
 │   ├── routers/
 │   │   ├── __init__.py
-│   │   └── buckets.py      # S3 Bucket management API routes (POST, GET, DELETE)
+│   │   ├── buckets.py      # S3 Bucket management API routes (POST, GET, DELETE)
+│   │   ├── objects.py      # S3 Object storage API routes (POST, GET, STREAM, DELETE)
+│   │   └── presign.py      # S3 Pre-signed URL generation and authenticated download routes
 │   ├── requirements.txt    # Python dependencies (FastAPI, SQLAlchemy, Uvicorn, etc.)
 │   ├── storage/            # Local directory for simulated S3 object blobs
-│   ├── tests/              # Backend test suite (pytest)
+│   ├── tests/              # Backend test suite (pytest: buckets, objects, presign, health)
 │   └── .env.example        # Environment variables template
 ├── frontend/
 │   ├── package.json        # Next.js and Tailwind CSS dependencies
@@ -34,14 +36,18 @@ A simulated Amazon S3 object storage platform featuring:
 │   │       ├── globals.css # Base styling & dark theme variables
 │   │       ├── layout.tsx  # Root application layout
 │   │       ├── page.tsx    # AWS S3 Console styled bucket management dashboard
-│   │       └── buckets/    # /buckets route re-export
+│   │       └── buckets/
+│   │           └── [bucketName]/
+│   │               └── page.tsx # AWS S3 Object Browser, Dropzone, Preview & Pre-sign Modal
 │   └── .env.example        # Next.js environment configuration
 └── README.md
 ```
 
 ---
 
-## API Endpoints (Stage 2: Bucket Management)
+## API Endpoints
+
+### Bucket Management (`/api/buckets`)
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -50,11 +56,21 @@ A simulated Amazon S3 object storage platform featuring:
 | `POST` | `/api/buckets` | Create a new bucket with S3 naming validation (default region: `us-east-1`, returns 409 if name exists) |
 | `DELETE` | `/api/buckets/{bucket_name}` | Delete empty bucket (returns 400 "Bucket is not empty" if not empty, 204 if successful) |
 
-### S3 Bucket Naming Rules Enforced
-- Length between 3 and 63 characters.
-- Lowercase letters, numbers, and hyphens only (`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`).
-- Cannot start or end with a hyphen.
-- Must be unique across all buckets.
+### Object Storage (`/api/buckets/{bucket_name}/objects`)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/buckets/{bucket_name}/objects` | Multipart file upload; computes SHA-256 hash, detects MIME type, saves to disk & DB |
+| `GET` | `/api/buckets/{bucket_name}/objects` | List all objects in bucket with metadata (key, size, MIME type, hash, creation date) |
+| `GET` | `/api/buckets/{bucket_name}/objects/{key:path}` | Stream binary file with inline `Content-Disposition` for browser preview/download |
+| `DELETE` | `/api/buckets/{bucket_name}/objects/{key:path}` | Delete object record and physical file from disk; updates metrics |
+
+### Pre-signed URLs (`/api/buckets/.../presign` & `/api/shared/download`)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/buckets/{bucket_name}/objects/{key:path}/presign` | Generate time-limited, HMAC-SHA256 signed download URL (custom `expires_in` seconds) |
+| `GET` | `/api/shared/download?token=<TOKEN>` | Validate token authenticity and expiration; streams file attachment (403 if expired, 400 if invalid) |
 
 ---
 

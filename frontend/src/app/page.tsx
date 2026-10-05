@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import {
   Folder,
   Plus,
@@ -481,9 +482,12 @@ export default function S3BucketsConsole() {
                       <td className="p-3.5 font-medium text-slate-100">
                         <div className="flex items-center gap-2 group">
                           <Folder className="w-4 h-4 text-amber-500 fill-amber-500/20 shrink-0" />
-                          <span className="font-mono text-xs text-amber-300 hover:underline cursor-pointer">
+                          <Link
+                            href={`/buckets/${encodeURIComponent(bucket.name)}`}
+                            className="font-mono text-xs text-amber-300 hover:text-amber-200 hover:underline cursor-pointer"
+                          >
                             {bucket.name}
-                          </span>
+                          </Link>
                           <button
                             onClick={() => {
                               navigator.clipboard.writeText(bucket.name);

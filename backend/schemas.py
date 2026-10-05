@@ -32,3 +32,13 @@ class S3ObjectResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PresignRequest(BaseModel):
+    expires_in: int = Field(300, ge=1, le=604800, description="Token expiration window in seconds")
+
+
+class PresignResponse(BaseModel):
+    presigned_url: str = Field(..., description="Pre-signed download URL")
+    expires_at: str = Field(..., description="ISO 8601 expiration timestamp")
+    expires_in: int = Field(..., description="Token lifespan in seconds")
