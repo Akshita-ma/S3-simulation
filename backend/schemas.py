@@ -42,3 +42,13 @@ class PresignResponse(BaseModel):
     presigned_url: str = Field(..., description="Pre-signed download URL")
     expires_at: str = Field(..., description="ISO 8601 expiration timestamp")
     expires_in: int = Field(..., description="Token lifespan in seconds")
+
+
+class StatsResponse(BaseModel):
+    logical_size_bytes: int = Field(..., description="Cumulative logical size of all objects in DB")
+    physical_size_bytes: int = Field(..., description="Total size of unique blobs stored on disk")
+    saved_space_bytes: int = Field(..., description="Bytes saved through content-addressable deduplication")
+    dedup_ratio: str = Field(..., description="Deduplication space savings percentage")
+    total_objects: int = Field(..., description="Total count of S3Object records across all buckets")
+    unique_blobs: int = Field(..., description="Total count of unique physical blobs on disk")
+    encrypted_objects_count: int = Field(..., description="Number of client-side encrypted objects")

@@ -1,10 +1,12 @@
 import os
+import uuid
 import hashlib
 import mimetypes
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 try:
@@ -19,47 +21,31 @@ except ImportError:
 router = APIRouter(prefix="/buckets/{bucket_name}/objects", tags=["Objects"])
 
 
-def get_bucket_storage_dir(bucket_name: str) -> str:
-    """Returns absolute path to the bucket's storage directory."""
+def get_blobs_storage_dir() -> str:
+    """Returns absolute path to the content-addressable blobs directory."""
     storage_root = os.path.abspath(os.getenv("STORAGE_DIR", "./storage"))
-    bucket_dir = os.path.join(storage_root, bucket_name)
-    os.makedirs(bucket_dir, exist_ok=True)
-    return bucket_dir
-
-
-def resolve_object_path(bucket_name: str, key: str) -> str:
-    """
-    Safely resolves object key to a physical storage path,
-    preventing path traversal attacks.
-    """
-    bucket_dir = get_bucket_storage_dir(bucket_name)
-    sanitized_key = key.lstrip("/")
-    target_path = os.path.abspath(os.path.join(bucket_dir, sanitized_key))
-
-    # Path traversal validation
-    if not target_path.startswith(bucket_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid object key path (path traversal detected)."
-        )
-    return target_path
+    blobs_dir = os.path.join(storage_root, "blobs")
+    os.makedirs(blobs_dir, exist_ok=True)
+    return blobs_dir
 
 
 @router.post(
     "",
     response_model=S3ObjectResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload an object to bucket"
+    summary="Upload an object with Content-Addressable Deduplication"
 )
 async def upload_object(
     bucket_name: str,
     file: UploadFile = File(..., description="Binary file upload"),
     key: Optional[str] = Form(None, description="Optional custom object key/path"),
+    is_encrypted: bool = Form(False, description="Flag indicating client-side zero-knowledge encryption"),
     db: Session = Depends(get_db)
 ) -> S3ObjectResponse:
     """
-    Uploads a file to the specified bucket via multipart/form-data.
-    Computes SHA-256 hash, detects MIME type, saves physical file, and creates/updates DB record.
+    Uploads a file via multipart/form-data.
+    Computes SHA-256 hash and stores physical file under /storage/blobs/<sha256>.
+    If identical hash already exists on disk, avoids writing duplicate bytes (Deduplication).
     """
     # 1. Verify bucket exists
     bucket = db.query(models.Bucket).filter(models.Bucket.name == bucket_name).first()
@@ -78,29 +64,45 @@ async def upload_object(
         )
     object_key = raw_key.lstrip("/")
 
-    # 3. Resolve target storage path
-    target_path = resolve_object_path(bucket_name, object_key)
-    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    # Path traversal validation on the logical key name
+    if ".." in object_key.split("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid object key path (path traversal detected)."
+        )
 
-    # 4. Stream file to disk and calculate SHA-256 hash
+    blobs_dir = get_blobs_storage_dir()
+    temp_filename = f".tmp_{uuid.uuid4().hex}"
+    temp_path = os.path.join(blobs_dir, temp_filename)
+
     hasher = hashlib.sha256()
     size_bytes = 0
 
+    # 3. Stream incoming chunks to temporary file while calculating SHA-256
     try:
-        with open(target_path, "wb") as buffer:
-            while chunk := await file.read(64 * 1024):  # 64 KB chunks
+        with open(temp_path, "wb") as buffer:
+            while chunk := await file.read(64 * 1024):
                 hasher.update(chunk)
                 size_bytes += len(chunk)
                 buffer.write(chunk)
     except Exception as exc:
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to write file to storage: {str(exc)}"
+            detail=f"Failed to process incoming payload: {str(exc)}"
         )
 
     content_hash = hasher.hexdigest()
+    blob_target_path = os.path.join(blobs_dir, content_hash)
+
+    # 4. Content-Addressable Block Deduplication
+    if os.path.exists(blob_target_path):
+        # Identical blob exists on disk: discard temp file and reuse existing blob
+        os.remove(temp_path)
+    else:
+        # First occurrence of this blob: promote temp file to content-addressed name
+        os.replace(temp_path, blob_target_path)
 
     # 5. Detect MIME type
     mime_type = file.content_type
@@ -108,7 +110,7 @@ async def upload_object(
         guessed_type, _ = mimetypes.guess_type(object_key)
         mime_type = guessed_type or "application/octet-stream"
 
-    # 6. Save or update S3Object metadata in DB
+    # 6. Save or update S3Object metadata in SQLite
     s3_obj = (
         db.query(models.S3Object)
         .filter(models.S3Object.bucket_id == bucket.id, models.S3Object.key == object_key)
@@ -119,7 +121,8 @@ async def upload_object(
         s3_obj.size_bytes = size_bytes
         s3_obj.mime_type = mime_type
         s3_obj.content_hash = content_hash
-        s3_obj.storage_path = target_path
+        s3_obj.storage_path = blob_target_path
+        s3_obj.is_encrypted = is_encrypted
         s3_obj.created_at = datetime.now(timezone.utc)
     else:
         s3_obj = models.S3Object(
@@ -128,8 +131,8 @@ async def upload_object(
             size_bytes=size_bytes,
             mime_type=mime_type,
             content_hash=content_hash,
-            storage_path=target_path,
-            is_encrypted=False
+            storage_path=blob_target_path,
+            is_encrypted=is_encrypted
         )
         db.add(s3_obj)
 
@@ -203,12 +206,11 @@ def get_object(
     if not os.path.exists(s3_obj.storage_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Physical file missing for object '{sanitized_key}'."
+            detail=f"Physical blob missing for object '{sanitized_key}'."
         )
 
     filename = os.path.basename(s3_obj.key)
 
-    # Use inline content disposition so browsers can preview images/text/PDFs directly
     return FileResponse(
         path=s3_obj.storage_path,
         media_type=s3_obj.mime_type,
@@ -220,7 +222,7 @@ def get_object(
 @router.delete(
     "/{key:path}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete an object"
+    summary="Delete an object (Deduplication reference counted)"
 )
 def delete_object(
     bucket_name: str,
@@ -228,7 +230,8 @@ def delete_object(
     db: Session = Depends(get_db)
 ) -> Response:
     """
-    Deletes the object metadata from SQLite and removes physical file from disk.
+    Deletes object metadata from database.
+    Only removes the physical blob on disk if NO OTHER object record in any bucket references the same content_hash.
     """
     bucket = db.query(models.Bucket).filter(models.Bucket.name == bucket_name).first()
     if not bucket:
@@ -250,19 +253,24 @@ def delete_object(
             detail=f"Object '{sanitized_key}' not found in bucket '{bucket_name}'."
         )
 
-    # Delete physical file from disk if present
-    if os.path.exists(s3_obj.storage_path):
+    # Check if other objects reference this identical content_hash
+    other_references_count = (
+        db.query(func.count(models.S3Object.id))
+        .filter(
+            models.S3Object.content_hash == s3_obj.content_hash,
+            models.S3Object.id != s3_obj.id
+        )
+        .scalar() or 0
+    )
+
+    # Only delete physical blob if this was the last reference
+    if other_references_count == 0 and os.path.exists(s3_obj.storage_path):
         try:
             os.remove(s3_obj.storage_path)
-            # Remove parent directory if empty and within bucket directory
-            parent_dir = os.path.dirname(s3_obj.storage_path)
-            bucket_dir = get_bucket_storage_dir(bucket_name)
-            if parent_dir != bucket_dir and os.path.exists(parent_dir) and not os.listdir(parent_dir):
-                os.rmdir(parent_dir)
         except OSError:
             pass
 
-    # Delete database record
+    # Delete metadata record
     db.delete(s3_obj)
     db.commit()
 

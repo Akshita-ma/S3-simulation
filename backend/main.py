@@ -14,20 +14,24 @@ try:
     from routers.buckets import router as buckets_router
     from routers.objects import router as objects_router
     from routers.presign import router as presign_router
+    from routers.stats import router as stats_router
 except ImportError:
     from backend.database import engine, Base, get_db
     import backend.models as models
     from backend.routers.buckets import router as buckets_router
     from backend.routers.objects import router as objects_router
     from backend.routers.presign import router as presign_router
+    from backend.routers.stats import router as stats_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure all tables exist on startup
     Base.metadata.create_all(bind=engine)
-    # Ensure physical storage directory exists
-    os.makedirs(os.getenv("STORAGE_DIR", "./storage"), exist_ok=True)
+    # Ensure physical storage directory and content-addressed blobs directory exist
+    storage_dir = os.getenv("STORAGE_DIR", "./storage")
+    os.makedirs(storage_dir, exist_ok=True)
+    os.makedirs(os.path.join(storage_dir, "blobs"), exist_ok=True)
     yield
 
 
@@ -55,6 +59,7 @@ app.add_middleware(
 app.include_router(buckets_router, prefix="/api")
 app.include_router(objects_router, prefix="/api")
 app.include_router(presign_router, prefix="/api")
+app.include_router(stats_router, prefix="/api")
 
 
 @app.get("/", tags=["Root"])
