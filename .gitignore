@@ -1,0 +1,38 @@
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+.venv/
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Databases & local storage
+*.db
+*.sqlite
+*.sqlite3
+backend/storage/*
+!backend/storage/.gitkeep
+
+# Node & Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.npm
+.yarn
+
+# Environment & IDE
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.vscode/
+.idea/
+*.swp
+*.swo

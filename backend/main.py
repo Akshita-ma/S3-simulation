@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 try:
     from database import engine, Base, get_db
     import models  # Ensure models are loaded before create_all
+    from routers.buckets import router as buckets_router
 except ImportError:
     from backend.database import engine, Base, get_db
     import backend.models as models
+    from backend.routers.buckets import router as buckets_router
 
 
 @asynccontextmanager
@@ -44,6 +46,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register API Routers
+app.include_router(buckets_router, prefix="/api")
 
 
 @app.get("/", tags=["Root"])
