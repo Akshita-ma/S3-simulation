@@ -4,7 +4,7 @@ import hashlib
 import mimetypes
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -13,10 +13,12 @@ try:
     from database import get_db
     import models
     from schemas import S3ObjectResponse
+    from routers.pipeline import process_s3_event
 except ImportError:
     from backend.database import get_db
     import backend.models as models
     from backend.schemas import S3ObjectResponse
+    from backend.routers.pipeline import process_s3_event
 
 router = APIRouter(prefix="/buckets/{bucket_name}/objects", tags=["Objects"])
 
@@ -37,6 +39,7 @@ def get_blobs_storage_dir() -> str:
 )
 async def upload_object(
     bucket_name: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Binary file upload"),
     key: Optional[str] = Form(None, description="Optional custom object key/path"),
     is_encrypted: bool = Form(False, description="Flag indicating client-side zero-knowledge encryption"),
@@ -138,6 +141,10 @@ async def upload_object(
 
     db.commit()
     db.refresh(s3_obj)
+
+    # Asynchronously trigger AWS Lambda & CloudWatch event pipeline
+    if not (object_key.startswith("thumb_") or object_key.startswith("parsed_")):
+        background_tasks.add_task(process_s3_event, bucket_name, object_key)
 
     return s3_obj
 

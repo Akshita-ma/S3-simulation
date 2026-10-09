@@ -52,3 +52,17 @@ class StatsResponse(BaseModel):
     total_objects: int = Field(..., description="Total count of S3Object records across all buckets")
     unique_blobs: int = Field(..., description="Total count of unique physical blobs on disk")
     encrypted_objects_count: int = Field(..., description="Number of client-side encrypted objects")
+
+
+class ExecutionLogResponse(BaseModel):
+    id: int
+    event_type: str
+    bucket_name: str
+    key: str
+    status: str
+    duration_ms: int
+    message: str
+    timestamp: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+

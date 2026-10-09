@@ -15,6 +15,7 @@ try:
     from routers.objects import router as objects_router
     from routers.presign import router as presign_router
     from routers.stats import router as stats_router
+    from routers.pipeline import router as pipeline_router
 except ImportError:
     from backend.database import engine, Base, get_db
     import backend.models as models
@@ -22,6 +23,7 @@ except ImportError:
     from backend.routers.objects import router as objects_router
     from backend.routers.presign import router as presign_router
     from backend.routers.stats import router as stats_router
+    from backend.routers.pipeline import router as pipeline_router
 
 
 @asynccontextmanager
@@ -43,13 +45,24 @@ app = FastAPI(
 )
 
 # CORS Configuration
-# Allowed origins for frontend clients (e.g. Next.js on port 3000)
-cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+]
+
+# Allow additional environment origins if provided
+if os.getenv("CORS_ORIGINS"):
+    extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+    origins.extend(extra_origins)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins if "*" not in origins else ["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +73,7 @@ app.include_router(buckets_router, prefix="/api")
 app.include_router(objects_router, prefix="/api")
 app.include_router(presign_router, prefix="/api")
 app.include_router(stats_router, prefix="/api")
+app.include_router(pipeline_router, prefix="/api")
 
 
 @app.get("/", tags=["Root"])

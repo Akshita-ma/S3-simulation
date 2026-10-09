@@ -63,3 +63,23 @@ class S3Object(Base):
             f"<S3Object(id={self.id}, bucket_id={self.bucket_id}, "
             f"key='{self.key}', size={self.size_bytes}, hash='{self.content_hash[:8]}...')>"
         )
+
+
+class ExecutionLog(Base):
+    __tablename__ = "execution_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(64), nullable=False, default="s3:ObjectCreated:Put")
+    bucket_name = Column(String(63), nullable=False, index=True)
+    key = Column(String(1024), nullable=False, index=True)
+    status = Column(String(32), nullable=False)  # 'SUCCESS' / 'FAILED'
+    duration_ms = Column(Integer, nullable=False, default=0)
+    message = Column(String(4096), nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ExecutionLog(id={self.id}, event='{self.event_type}', "
+            f"bucket='{self.bucket_name}', key='{self.key}', status='{self.status}')>"
+        )
+
