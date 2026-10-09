@@ -33,6 +33,16 @@ import {
   Lock,
   Unlock,
   KeyRound,
+  Zap,
+  Terminal,
+  Activity,
+  Cpu,
+  Layers,
+  Sparkles,
+  Clock,
+  Radio,
+  Play,
+  RotateCcw,
 } from "lucide-react";
 import { encryptFileClientSide, decryptFileClientSide } from "@/lib/crypto";
 import ConsoleHeader from "@/components/ConsoleHeader";
@@ -46,6 +56,17 @@ interface S3Object {
   content_hash: string;
   is_encrypted: boolean;
   created_at: string;
+}
+
+interface ExecutionLog {
+  id: number;
+  event_type: string;
+  bucket_name: string;
+  key: string;
+  status: "SUCCESS" | "FAILED" | string;
+  duration_ms: number;
+  message: string;
+  timestamp: string;
 }
 
 interface BucketMeta {
@@ -70,7 +91,8 @@ const EXPIRATION_OPTIONS = [
   { label: "24 hours", seconds: 86400 },
 ];
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE = API_BASE_URL;
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -141,6 +163,19 @@ export default function BucketDetailPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+
+  // Active view tab switcher: "objects" | "logs"
+  const [activeTab, setActiveTab] = useState<"objects" | "logs">("objects");
+
+  // Lambda & CloudWatch Execution Logs State
+  const [logs, setLogs] = useState<ExecutionLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [refreshingLogs, setRefreshingLogs] = useState(false);
+  const [selectedLog, setSelectedLog] = useState<ExecutionLog | null>(null);
+  const [logSearchQuery, setLogSearchQuery] = useState("");
+  const [logStatusFilter, setLogStatusFilter] = useState<"ALL" | "SUCCESS" | "FAILED">("ALL");
+  const [autoRefreshLogs, setAutoRefreshLogs] = useState(false);
+  const [clearingLogs, setClearingLogs] = useState(false);
 
   // Upload Zone state
   const [isDragOver, setIsDragOver] = useState(false);
@@ -216,11 +251,66 @@ export default function BucketDetailPage() {
     }
   };
 
+  // Fetch CloudWatch Execution Logs
+  const loadLogs = async (isManual = false) => {
+    if (isManual) setRefreshingLogs(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/logs`);
+      if (res.ok) {
+        const data: ExecutionLog[] = await res.json();
+        setLogs(data);
+        if (data.length > 0) {
+          setSelectedLog((prev) => {
+            if (!prev) return data[0];
+            const found = data.find((l) => l.id === prev.id);
+            return found || data[0];
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to load CloudWatch logs:", err);
+    } finally {
+      setLogsLoading(false);
+      if (isManual) setRefreshingLogs(false);
+    }
+  };
+
+  // Clear CloudWatch Execution Logs
+  const handleClearLogs = async () => {
+    setClearingLogs(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/buckets/${encodeURIComponent(bucketName)}/logs`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setLogs([]);
+        setSelectedLog(null);
+        showToast("CloudWatch execution logs cleared", "success");
+      } else {
+        throw new Error("Failed to clear execution logs.");
+      }
+    } catch (err: any) {
+      showToast(err.message || "Failed to clear logs", "error");
+    } finally {
+      setClearingLogs(false);
+    }
+  };
+
   useEffect(() => {
     if (bucketName) {
       loadData();
+      loadLogs();
     }
   }, [bucketName]);
+
+  // Auto-refresh CloudWatch logs effect
+  useEffect(() => {
+    if (!autoRefreshLogs || !bucketName) return;
+    const interval = setInterval(() => {
+      loadLogs();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [autoRefreshLogs, bucketName]);
 
   // Active countdown timer effect for pre-signed URL
   useEffect(() => {
@@ -258,6 +348,29 @@ export default function BucketDetailPage() {
         obj.mime_type.toLowerCase().includes(searchQuery.toLowerCase())
     );
   }, [objects, searchQuery]);
+
+  // Filtered execution logs
+  const filteredLogs = useMemo(() => {
+    return logs.filter((log) => {
+      const matchesSearch =
+        log.key.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
+        log.message.toLowerCase().includes(logSearchQuery.toLowerCase());
+      const matchesStatus =
+        logStatusFilter === "ALL" || log.status === logStatusFilter;
+      return matchesSearch && matchesStatus;
+    });
+  }, [logs, logSearchQuery, logStatusFilter]);
+
+  // Log metrics summary
+  const logMetrics = useMemo(() => {
+    const total = logs.length;
+    const success = logs.filter((l) => l.status === "SUCCESS").length;
+    const failed = logs.filter((l) => l.status === "FAILED").length;
+    const avgDuration =
+      total > 0 ? Math.round(logs.reduce((sum, l) => sum + l.duration_ms, 0) / total) : 0;
+    const successRate = total > 0 ? Math.round((success / total) * 100) : 100;
+    return { total, success, failed, avgDuration, successRate };
+  }, [logs]);
 
   // Handle Drag & Drop
   const handleDragOver = (e: React.DragEvent) => {
@@ -347,6 +460,16 @@ export default function BucketDetailPage() {
       setEncryptionPassphrase("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       loadData();
+      loadLogs();
+      // Allow simulated asynchronous Lambda BackgroundTask to complete
+      setTimeout(() => {
+        loadData();
+        loadLogs();
+      }, 1200);
+      setTimeout(() => {
+        loadData();
+        loadLogs();
+      }, 2500);
     } catch (err: any) {
       setUploadError(err.message);
     } finally {
@@ -653,8 +776,48 @@ export default function BucketDetailPage() {
           </div>
         </div>
 
-        {/* Upload Zone with Client-Side Encryption Toggle */}
-        <section className="bg-[#121c2e] border border-slate-800 rounded-xl p-5 space-y-4">
+        {/* AWS Service Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-slate-800">
+          <button
+            onClick={() => setActiveTab("objects")}
+            className={`inline-flex items-center gap-2 px-4 py-3 text-xs font-semibold border-b-2 transition-all ${
+              activeTab === "objects"
+                ? "border-amber-500 text-amber-400 bg-amber-950/15"
+                : "border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+            }`}
+          >
+            <HardDrive className="w-4 h-4" />
+            <span>Objects</span>
+            <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+              {objects.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("logs");
+              loadLogs(true);
+            }}
+            className={`inline-flex items-center gap-2 px-4 py-3 text-xs font-semibold border-b-2 transition-all ${
+              activeTab === "logs"
+                ? "border-amber-500 text-amber-400 bg-amber-950/15"
+                : "border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+            }`}
+          >
+            <Zap className={`w-4 h-4 ${activeTab === "logs" ? "text-amber-400 fill-amber-400" : "text-slate-400"}`} />
+            <span>Lambda Triggers & CloudWatch Logs</span>
+            {logs.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-amber-950/80 border border-amber-600/50 text-amber-300">
+                {logs.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {activeTab === "objects" && (
+          <div className="space-y-6">
+            {/* Upload Zone with Client-Side Encryption Toggle */}
+            <section className="bg-[#121c2e] border border-slate-800 rounded-xl p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <UploadCloud className="w-5 h-5 text-amber-400" />
@@ -928,6 +1091,13 @@ export default function BucketDetailPage() {
                             {obj.key}
                           </button>
 
+                          {(obj.key.startsWith("thumb_") || obj.key.startsWith("parsed_")) && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-950/90 border border-amber-500/50 text-amber-300 shadow-xs shadow-amber-950">
+                              <Zap className="w-2.5 h-2.5 fill-amber-400 text-amber-400 shrink-0" />
+                              <span>⚡ Lambda Processed</span>
+                            </span>
+                          )}
+
                           {obj.is_encrypted && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/80 border border-emerald-500/50 text-emerald-300">
                               <Lock className="w-2.5 h-2.5" />
@@ -1002,6 +1172,434 @@ export default function BucketDetailPage() {
           </table>
         </div>
       </div>
+    )}
+
+    {/* Lambda Triggers & CloudWatch Logs Tab View */}
+    {activeTab === "logs" && (
+      <div className="space-y-6 animate-in fade-in duration-150">
+        {/* AWS Lambda Pipeline Header & Architecture Card */}
+        <div className="bg-[#121c2e] border border-slate-800 rounded-xl p-5 space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                <Zap className="w-6 h-6 fill-amber-400" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-bold text-white font-mono">
+                    AWS Lambda & CloudWatch Event Pipeline
+                  </h2>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-950/80 border border-emerald-500/50 text-emerald-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Active Trigger
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Trigger Event: <code className="text-amber-300 font-mono">s3:ObjectCreated:Put</code> on bucket{" "}
+                  <code className="text-white font-mono">{bucketName}</code>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 text-xs">
+              <button
+                onClick={() => setAutoRefreshLogs(!autoRefreshLogs)}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded border text-xs font-medium transition-colors ${
+                  autoRefreshLogs
+                    ? "bg-amber-950/80 border-amber-500/60 text-amber-300 shadow-sm shadow-amber-950"
+                    : "bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200"
+                }`}
+                title="Auto-refresh logs every 3 seconds"
+              >
+                <Radio className={`w-3.5 h-3.5 ${autoRefreshLogs ? "text-amber-400 animate-pulse" : ""}`} />
+                <span>{autoRefreshLogs ? "Live Stream (3s)" : "Enable Live Stream"}</span>
+              </button>
+
+              <button
+                onClick={() => loadLogs(true)}
+                disabled={refreshingLogs}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-950 bg-[#ec7211] hover:bg-[#ff841f] active:bg-[#d6650b] rounded transition-colors disabled:opacity-50"
+                title="Refresh CloudWatch execution logs"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshingLogs ? "animate-spin" : ""}`} />
+                <span>Refresh Logs</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 3 Simulated Lambda Handlers Rules */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="p-3 bg-[#0a1220] border border-slate-800 rounded-lg space-y-1">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
+                <FileImage className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Image Handler (Pillow)</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Generates compressed 200x200 thumbnail saved as{" "}
+                <code className="text-amber-300 font-mono">thumb_&lt;key&gt;</code> in the same bucket.
+              </p>
+            </div>
+
+            <div className="p-3 bg-[#0a1220] border border-slate-800 rounded-lg space-y-1">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                <span>CSV Transformer</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Parses first 50 rows into JSON and creates companion object{" "}
+                <code className="text-amber-300 font-mono">parsed_&lt;key&gt;.json</code>.
+              </p>
+            </div>
+
+            <div className="p-3 bg-[#0a1220] border border-slate-800 rounded-lg space-y-1">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-300">
+                <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Plaintext Metrics</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Calculates word count, line count, and character volume in CloudWatch execution report.
+              </p>
+            </div>
+          </div>
+
+          {/* Metrics Bar */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+            <div className="p-2.5 bg-[#090f1a] border border-slate-800/80 rounded-lg">
+              <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-semibold">
+                Total Invocations
+              </span>
+              <span className="text-base font-bold text-white font-mono">{logMetrics.total}</span>
+            </div>
+
+            <div className="p-2.5 bg-[#090f1a] border border-slate-800/80 rounded-lg">
+              <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-semibold">
+                Success Rate
+              </span>
+              <span className="text-base font-bold text-emerald-400 font-mono">
+                {logMetrics.total > 0 ? `${logMetrics.successRate}%` : "100%"}
+              </span>
+            </div>
+
+            <div className="p-2.5 bg-[#090f1a] border border-slate-800/80 rounded-lg">
+              <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-semibold">
+                Avg Duration
+              </span>
+              <span className="text-base font-bold text-amber-300 font-mono">
+                {logMetrics.total > 0 ? `${logMetrics.avgDuration} ms` : "0 ms"}
+              </span>
+            </div>
+
+            <div className="p-2.5 bg-[#090f1a] border border-slate-800/80 rounded-lg">
+              <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-semibold">
+                Memory Size
+              </span>
+              <span className="text-base font-bold text-cyan-300 font-mono">128 MB</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Toolbar for Search & Status Filter */}
+        <div className="bg-[#121c2e] border border-slate-800 rounded-lg p-3 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search triggers by object key or log text..."
+              value={logSearchQuery}
+              onChange={(e) => setLogSearchQuery(e.target.value)}
+              className="w-full bg-[#0b1322] border border-slate-700 rounded pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
+            />
+            {logSearchQuery && (
+              <button
+                onClick={() => setLogSearchQuery("")}
+                className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-200 text-xs"
+              >
+                &times;
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="flex items-center border border-slate-700 rounded p-0.5 bg-[#0b1322] text-xs">
+              <button
+                onClick={() => setLogStatusFilter("ALL")}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                  logStatusFilter === "ALL"
+                    ? "bg-slate-800 text-white"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                All ({logMetrics.total})
+              </button>
+              <button
+                onClick={() => setLogStatusFilter("SUCCESS")}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                  logStatusFilter === "SUCCESS"
+                    ? "bg-emerald-950 text-emerald-300 border border-emerald-600/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Success ({logMetrics.success})
+              </button>
+              <button
+                onClick={() => setLogStatusFilter("FAILED")}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                  logStatusFilter === "FAILED"
+                    ? "bg-red-950 text-red-300 border border-red-600/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Failed ({logMetrics.failed})
+              </button>
+            </div>
+
+            {logs.length > 0 && (
+              <button
+                onClick={handleClearLogs}
+                disabled={clearingLogs}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-slate-400 hover:text-red-400 hover:bg-red-950/30 border border-slate-800 rounded transition-colors"
+                title="Clear execution logs"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Split View: Trigger Table on Left, Live CloudWatch Terminal on Right */}
+        {filteredLogs.length === 0 ? (
+          <div className="p-16 border border-slate-800 rounded-xl bg-[#0f1728] text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+              <Zap className="w-6 h-6 fill-amber-400" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">
+                {logs.length === 0 ? "No Lambda Trigger Events Yet" : "No matching log records found"}
+              </h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                {logs.length === 0
+                  ? "Upload an image (PNG/JPEG), CSV spreadsheet, or text document in the Objects tab to trigger the AWS Lambda and CloudWatch event pipeline."
+                  : `No execution logs matched your filter '${logSearchQuery}'.`}
+              </p>
+            </div>
+            {logs.length === 0 && (
+              <button
+                onClick={() => setActiveTab("objects")}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-950 bg-[#ec7211] hover:bg-[#ff841f] rounded transition-colors"
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                <span>Go to Upload Zone</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* Left Column: Events Table (5 cols on lg) */}
+            <div className="lg:col-span-5 bg-[#0f1728] border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+              <div className="px-4 py-3 bg-[#162238] border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-amber-400" />
+                  <h3 className="text-xs font-semibold text-white">Trigger Invocations</h3>
+                </div>
+                <span className="text-[11px] text-slate-400 font-mono">
+                  Showing {filteredLogs.length} events
+                </span>
+              </div>
+
+              <div className="divide-y divide-slate-800/80 max-h-[580px] overflow-y-auto">
+                {filteredLogs.map((log) => {
+                  const isSelected = selectedLog?.id === log.id;
+                  return (
+                    <div
+                      key={log.id}
+                      onClick={() => setSelectedLog(log)}
+                      className={`p-3.5 cursor-pointer transition-all ${
+                        isSelected
+                          ? "bg-[#18263f] border-l-4 border-amber-500 shadow-inner"
+                          : "hover:bg-[#131d2e]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold font-mono border ${
+                            log.status === "SUCCESS"
+                              ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/50"
+                              : "bg-red-950/80 text-red-300 border-red-500/50"
+                          }`}
+                        >
+                          {log.status === "SUCCESS" ? (
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                          ) : (
+                            <XCircle className="w-3 h-3 text-red-400" />
+                          )}
+                          <span>{log.status}</span>
+                        </span>
+
+                        <span className="font-mono text-[11px] text-amber-400 font-semibold">
+                          {log.duration_ms} ms
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="font-mono text-xs text-white font-medium truncate flex-1"
+                          title={log.key}
+                        >
+                          {log.key}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 mt-2 font-mono">
+                        <span>{log.event_type}</span>
+                        <span>{formatDate(log.timestamp)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Right Column: Live CloudWatch Terminal (7 cols on lg) */}
+            <div className="lg:col-span-7 bg-[#070d17] border border-slate-800 rounded-xl overflow-hidden shadow-2xl flex flex-col min-h-[500px]">
+              {/* Terminal Title Bar */}
+              <div className="bg-[#101726] px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
+                  </div>
+                  <span className="text-slate-500 mx-1">|</span>
+                  <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-xs font-mono text-slate-300 truncate max-w-xs sm:max-w-md">
+                    /aws/lambda/s3-pipeline {selectedLog ? `› [log-id:${selectedLog.id}]` : ""}
+                  </span>
+                </div>
+
+                {selectedLog && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(selectedLog.message);
+                      showToast("Copied raw CloudWatch logs to clipboard", "success");
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded transition-colors"
+                    title="Copy raw log output"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy Logs</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Terminal Body */}
+              <div className="p-4 font-mono text-xs overflow-x-auto flex-1 select-text bg-[#070d17] max-h-[550px] overflow-y-auto">
+                {selectedLog ? (
+                  <div className="space-y-1">
+                    {selectedLog.message.split("\n").map((line, idx) => {
+                      if (line.startsWith("START")) {
+                        return (
+                          <div key={idx} className="text-cyan-400 font-semibold flex items-start gap-2">
+                            <span className="text-slate-600 select-none w-6 text-right shrink-0">
+                              {idx + 1}
+                            </span>
+                            <span>{line}</span>
+                          </div>
+                        );
+                      }
+                      if (line.startsWith("END")) {
+                        return (
+                          <div key={idx} className="text-cyan-400/80 font-semibold flex items-start gap-2">
+                            <span className="text-slate-600 select-none w-6 text-right shrink-0">
+                              {idx + 1}
+                            </span>
+                            <span>{line}</span>
+                          </div>
+                        );
+                      }
+                      if (line.startsWith("REPORT")) {
+                        return (
+                          <div
+                            key={idx}
+                            className="text-amber-300 font-bold bg-amber-950/40 border border-amber-800/60 rounded p-2.5 my-2 flex items-start gap-2"
+                          >
+                            <span className="text-amber-600 select-none w-6 text-right shrink-0">
+                              {idx + 1}
+                            </span>
+                            <span>{line}</span>
+                          </div>
+                        );
+                      }
+                      if (line.includes("ERROR")) {
+                        return (
+                          <div key={idx} className="text-red-400 font-medium flex items-start gap-2">
+                            <span className="text-red-700 select-none w-6 text-right shrink-0">
+                              {idx + 1}
+                            </span>
+                            <span>{line}</span>
+                          </div>
+                        );
+                      }
+                      if (line.includes("INFO")) {
+                        const parts = line.split("INFO");
+                        return (
+                          <div key={idx} className="text-slate-300 flex items-start gap-2">
+                            <span className="text-slate-600 select-none w-6 text-right shrink-0">
+                              {idx + 1}
+                            </span>
+                            <span>
+                              <span className="text-slate-500">{parts[0]}</span>
+                              <span className="text-sky-400 font-semibold">INFO</span>
+                              <span className="text-slate-200">{parts.slice(1).join("INFO")}</span>
+                            </span>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div key={idx} className="text-slate-400 flex items-start gap-2">
+                          <span className="text-slate-600 select-none w-6 text-right shrink-0">
+                            {idx + 1}
+                          </span>
+                          <span>{line}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-24 text-slate-500 space-y-3">
+                    <Terminal className="w-10 h-10 text-slate-600" />
+                    <p className="text-xs">
+                      Select an event from the trigger log list to view its CloudWatch stream.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Terminal Footer Info */}
+              {selectedLog && (
+                <div className="px-4 py-2 border-t border-slate-800 bg-[#090f1a] text-[11px] font-mono text-slate-500 flex items-center justify-between">
+                  <span>
+                    Status:{" "}
+                    <span
+                      className={
+                        selectedLog.status === "SUCCESS"
+                          ? "text-emerald-400 font-semibold"
+                          : "text-red-400 font-semibold"
+                      }
+                    >
+                      {selectedLog.status}
+                    </span>
+                  </span>
+                  <span>Duration: {selectedLog.duration_ms} ms</span>
+                  <span>Memory: 128 MB</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    )}
+  </div>
 
       {/* DECRYPTION PROMPT MODAL (Stage 5) */}
       {decryptTargetObject && (

@@ -51,7 +51,8 @@ const REGION_OPTIONS = [
   { value: "sa-east-1", label: "South America (São Paulo) sa-east-1" },
 ];
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE = API_BASE_URL;
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -115,8 +116,12 @@ export default function S3BucketsConsole() {
     if (isManualRefresh) setRefreshing(true);
     try {
       const [bucketsRes, statsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/buckets`),
-        fetch(`${API_BASE}/api/stats`),
+        fetch(`${API_BASE_URL}/api/buckets`, {
+          headers: { "Content-Type": "application/json" },
+        }),
+        fetch(`${API_BASE_URL}/api/stats`, {
+          headers: { "Content-Type": "application/json" },
+        }),
       ]);
 
       if (!bucketsRes.ok) {
@@ -178,7 +183,7 @@ export default function S3BucketsConsole() {
     setCreateError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/buckets`, {
+      const res = await fetch(`${API_BASE_URL}/api/buckets`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -227,8 +232,9 @@ export default function S3BucketsConsole() {
     setDeleteError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/buckets/${encodeURIComponent(bucketToDelete.name)}`, {
+      const res = await fetch(`${API_BASE_URL}/api/buckets/${encodeURIComponent(bucketToDelete.name)}`, {
         method: "DELETE",
+        headers: { "Content-Type": "application/json" },
       });
 
       if (!res.ok) {
